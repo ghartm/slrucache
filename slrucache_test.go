@@ -91,18 +91,6 @@ func TestSLRUCacheLookup(t *testing.T) {
 	}
 }
 
-func TestSLRUCacheDebug(t *testing.T) {
-	c := NewSLRUCache(10, 10)
-	//hit, miss := movingWindow(c, 3, 10, 5, 1, false)
-	hit, miss := movingWindow(c, 1000, 111, 5, 1, true)
-	fmt.Printf("hit:%d miss:%d total:%d ratio: %f%%\n", hit, miss, hit+miss, (float64(hit*100) / float64(hit+miss)))
-	checkSLRUCacheSanity(c)
-	// fails allway so messages are printed
-	//t.Fail()
-}
-
-// go test -bench=. -benchmem
-
 func movingWindow(c *SLRUCache, windowRange, windowSize, windowStep, windowRepeat int, randomaccess bool) (int, int) {
 	// moving window over range
 	baseRange := windowSize * windowRange
