@@ -250,9 +250,9 @@ func (c *SLRUCache[K, V]) Lookup(key K) *V {
 	// Insert at head of lrulist
 	c.lrulist.insertHead(n)
 
+	// Unlock mutex before user callbacks
 	mutex.Unlock()
 
-	// Unlock mutex before user callbacks
 	if c.removeCb != nil && removal {
 		c.removeCb(removedKey)
 	}
