@@ -150,8 +150,8 @@ type SLRUCache[K comparable, V any] struct {
 	snum int // number of survivor entries (lrulist size)
 	pnum int // number of probationary entries (probelist size)
 
-	insertCb func() // optional callback after insert into lrulist
-	removeCb func() // optional callback after removal from lrulist
+	insertCb func(K) // optional callback after insert into lrulist
+	removeCb func(K) // optional callback after removal from lrulist
 
 	freelist  *SLRUList[K, V] // list of free entries
 	lrulist   *SLRUList[K, V] // protected segment
@@ -173,8 +173,8 @@ func NewSLRUCache[K comparable, V any](lruEntries int, probeEntries int) *SLRUCa
 	cache.lrulist = NewSLRUList(&cache.entries)
 	cache.probelist = NewSLRUList(&cache.entries)
 
-	cache.insertCb = cache.insertCbStub
-	cache.removeCb = cache.removeCbStub
+	cache.insertCb = nil
+	cache.removeCb = nil
 
 	// Initialize freelist with all entries
 	for i := 0; i < cache.cnum; i++ {
@@ -189,12 +189,6 @@ func (c *SLRUCache[K, V]) doPanic(msg string) {
 	checkSLRUCacheSanity(c)
 	panic(msg)
 }
-
-// Default no-op insert callback
-func (c *SLRUCache[K, V]) insertCbStub() {}
-
-// Default no-op remove callback
-func (c *SLRUCache[K, V]) removeCbStub() {}
 
 // Lookup returns a pointer to the value for the given key, or nil if not found.
 // It also promotes entries from probelist to lrulist on hit.
@@ -213,7 +207,6 @@ func (c *SLRUCache[K, V]) Lookup(key K) *V {
 				c.doPanic(fmt.Sprintf("Lookup: cannot remove from lrulist index %d", n))
 			}
 			c.lrulist.insertHead(n)
-			c.insertCb()
 		}
 		return &e.value
 	}
@@ -226,13 +219,15 @@ func (c *SLRUCache[K, V]) Lookup(key K) *V {
 		if lt != SLRU_EOF {
 			// Remove old key from mapping and clear entry
 			delete(c.mapping, c.entries[lt].key)
+			if c.removeCb != nil {
+				c.removeCb(c.entries[lt].key)
+			}
 			var zeroK K
 			var zeroV V
 			c.entries[lt].key = zeroK
 			c.entries[lt].value = zeroV
 			// Put removed entry into freelist
 			c.freelist.insertHead(lt)
-			c.removeCb()
 		}
 	}
 
@@ -242,6 +237,9 @@ func (c *SLRUCache[K, V]) Lookup(key K) *V {
 	}
 	// Insert at head of lrulist
 	c.lrulist.insertHead(n)
+	if c.insertCb != nil {
+		c.insertCb(key)
+	}
 
 	return &e.value
 }
@@ -269,7 +267,7 @@ func (c *SLRUCache[K, V]) Insert(key K, value V) {
 		var zeroV V
 		c.entries[n].key = zeroK
 		c.entries[n].value = zeroV
-		c.removeCb()
+
 	} else {
 		// Take from freelist
 		n = c.freelist.removeTail()
@@ -311,7 +309,9 @@ func (c *SLRUCache[K, V]) Remove(key K) bool {
 	e.value = zeroV
 	c.freelist.insertHead(n)
 
-	c.removeCb()
+	if c.removeCb != nil {
+		c.removeCb(key)
+	}
 
 	return true
 }
