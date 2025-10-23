@@ -7,23 +7,31 @@ import (
 	"testing"
 )
 
-// go test
-func insertN(c *SLRUCache, count int, offset int) {
+// The generic SLRUCache uses type parameters for keys and values.
+// We assume NewSLRUCache is now generic: NewSLRUCache[K comparable, V any](lruCap, probeCap int) *SLRUCache[K, V]
+
+// Helper functions adapted for generic SLRUCache[string, string]
+
+// insertN inserts `count` string keys and values starting from offset into the cache.
+func insertN(c *SLRUCache[string, string], count int, offset int) {
 	for n := 0; n < count; n++ {
 		s := strconv.Itoa(n + offset)
 		c.Insert(s, s)
 	}
 }
 
-func lookupN(c *SLRUCache, count int, offset int) {
+// lookupN looks up `count` string keys starting from offset in the cache.
+func lookupN(c *SLRUCache[string, string], count int, offset int) {
 	for n := 0; n < count; n++ {
 		s := strconv.Itoa(n + offset)
 		c.Lookup(s)
 	}
 }
 
-func checkListCount(c *SLRUCache, free, lru, probe int, msg string) bool {
-	var fail bool = false
+// checkListCount verifies the counts of freelist, lrulist, and probelist in the cache.
+// Returns true if any count mismatches, false otherwise.
+func checkListCount(c *SLRUCache[string, string], free, lru, probe int, msg string) bool {
+	fail := false
 	if c.probelist.count != probe {
 		fail = true
 	}
@@ -34,14 +42,16 @@ func checkListCount(c *SLRUCache, free, lru, probe int, msg string) bool {
 		fail = true
 	}
 	if fail {
-		fmt.Printf("checkListCount: free:%d/%d lru:%d/%d probe:%d/%d (%s)", free, c.freelist.count, lru, c.lrulist.count, probe, c.probelist.count, msg)
+		fmt.Printf("checkListCount: free:%d/%d lru:%d/%d probe:%d/%d (%s)\n",
+			free, c.freelist.count, lru, c.lrulist.count, probe, c.probelist.count, msg)
 	}
 	return fail
 }
 
+// TestSLRUCacheInsert tests insertion behavior of the generic SLRUCache.
 func TestSLRUCacheInsert(t *testing.T) {
 	// insert up to the cache capacity
-	c := NewSLRUCache(10, 10)
+	c := NewSLRUCache[string, string](10, 10)
 	insertN(c, 10, 0)
 	// all inserted entries supposed to be in probe
 	if checkListCount(c, 10, 0, 10, "insert up to the cache capacity") || checkSLRUCacheSanity(c) {
@@ -49,7 +59,7 @@ func TestSLRUCacheInsert(t *testing.T) {
 	}
 
 	// insert twice with doubled probe capacity
-	c = NewSLRUCache(10, 20)
+	c = NewSLRUCache[string, string](10, 20)
 	insertN(c, 10, 0)
 	insertN(c, 10, 0)
 	// all distinct inserted are supposed to be in probe
@@ -58,10 +68,10 @@ func TestSLRUCacheInsert(t *testing.T) {
 	}
 }
 
+// TestSLRUCacheLookup tests lookup behavior and promotion from probe to lru.
 func TestSLRUCacheLookup(t *testing.T) {
-
 	// insert capacity and lookup every inserted once
-	c := NewSLRUCache(10, 10)
+	c := NewSLRUCache[string, string](10, 10)
 	insertN(c, 10, 0)
 	lookupN(c, 10, 0)
 	// all inserted entries supposed to be in lru
@@ -91,37 +101,30 @@ func TestSLRUCacheLookup(t *testing.T) {
 	}
 }
 
-func movingWindow(c *SLRUCache, windowRange, windowSize, windowStep, windowRepeat int, randomaccess bool) (int, int) {
-	// moving window over range
+// movingWindow performs a moving window access pattern over the cache.
+// Returns hit and miss counts.
+func movingWindow(c *SLRUCache[string, string], windowRange, windowSize, windowStep, windowRepeat int, randomaccess bool) (int, int) {
 	baseRange := windowSize * windowRange
 	hit := 0
 	miss := 0
 	var p int
-	var count int = 0
+	count := 0
 	var s string
 	adj := (windowSize % 2)
 
-	// use same seed for deterministic results
-	rnd := rand.New(rand.NewSource(1))
+	rnd := rand.New(rand.NewSource(1)) // deterministic seed
 
 	for w := 0; w < (baseRange - windowSize); w += windowStep {
 		for i := 0; i < windowRepeat; i++ {
 			count++
 			for n := 0; n < windowSize; n++ {
-				// lookup elements of window
-				// w = start of window relative to baseRange
-				// i = repetition count of window
-				// n = index relative to Window
 				if randomaccess {
 					s = strconv.Itoa(w + rnd.Intn(windowSize))
 				} else {
 					if count%2 == 0 {
-						// fixed and mixed access pattern for deterministic results
 						if n%2 == 0 {
-							// pick even window positions ascending from left side
 							p = n
 						} else {
-							// pick odd window positions descending from right side
 							p = (windowSize - n) - adj
 						}
 					} else {
@@ -142,8 +145,9 @@ func movingWindow(c *SLRUCache, windowRange, windowSize, windowStep, windowRepea
 	return hit, miss
 }
 
+// BenchmarkMovingWindow benchmarks the moving window pattern on the generic cache.
 func BenchmarkMovingWindow(b *testing.B) {
-	c := NewSLRUCache(50, 50)
+	c := NewSLRUCache[string, string](50, 50)
 	for n := 0; n < b.N; n++ {
 		movingWindow(c, 10, 100, 5, 2, false)
 	}
