@@ -4,6 +4,11 @@ package slrucache
 
 import (
 	"fmt"
+	"sync"
+)
+
+var (
+	mutex sync.Mutex
 )
 
 // SLRU_EOF is a special marker for the end of the list.
@@ -198,36 +203,42 @@ func (c *SLRUCache[K, V]) Lookup(key K) *V {
 		return nil
 	}
 
+	mutex.Lock()
+
 	e := &c.entries[n]
 	// If entry is in lrulist (protected segment)
 	if e.list == c.lrulist {
 		if n != c.lrulist.head {
 			// Move to head of lrulist (most recently used)
+
 			if !c.lrulist.remove(n) {
 				c.doPanic(fmt.Sprintf("Lookup: cannot remove from lrulist index %d", n))
 			}
 			c.lrulist.insertHead(n)
 		}
+		mutex.Unlock()
 		return &e.value
 	}
 
 	// Entry is in probelist or freelist (should not be freelist)
 	// Try to promote to lrulist
+	var removal bool
+	var removedKey K
 	if c.lrulist.count >= c.snum {
 		// lrulist full, remove tail entry
 		lt := c.lrulist.removeTail()
 		if lt != SLRU_EOF {
 			// Remove old key from mapping and clear entry
 			delete(c.mapping, c.entries[lt].key)
-			if c.removeCb != nil {
-				c.removeCb(c.entries[lt].key)
-			}
+			removal = true
+			removedKey = c.entries[lt].key
 			var zeroK K
 			var zeroV V
 			c.entries[lt].key = zeroK
 			c.entries[lt].value = zeroV
 			// Put removed entry into freelist
 			c.freelist.insertHead(lt)
+
 		}
 	}
 
@@ -235,8 +246,17 @@ func (c *SLRUCache[K, V]) Lookup(key K) *V {
 	if !e.list.remove(n) {
 		c.doPanic(fmt.Sprintf("Lookup: cannot remove from probelist index %d", n))
 	}
+
 	// Insert at head of lrulist
 	c.lrulist.insertHead(n)
+
+	mutex.Unlock()
+
+	// Unlock mutex before user callbacks
+	if c.removeCb != nil && removal {
+		c.removeCb(removedKey)
+	}
+
 	if c.insertCb != nil {
 		c.insertCb(key)
 	}
@@ -247,10 +267,14 @@ func (c *SLRUCache[K, V]) Lookup(key K) *V {
 // Insert adds or updates a key-value pair in the cache.
 // New entries go into the probelist first.
 func (c *SLRUCache[K, V]) Insert(key K, value V) {
+
+	mutex.Lock()
+
 	if n, ok := c.mapping[key]; ok {
 		// Key exists, update value if changed
 		e := &c.entries[n]
 		e.value = value
+		mutex.Unlock()
 		return
 	}
 
@@ -285,15 +309,20 @@ func (c *SLRUCache[K, V]) Insert(key K, value V) {
 
 	// Insert at head of probelist
 	c.probelist.insertHead(n)
+
+	mutex.Unlock()
 }
 
 // Remove deletes an entry by key from the cache.
 // Returns true if the entry was found and removed.
 func (c *SLRUCache[K, V]) Remove(key K) bool {
+
 	n, ok := c.mapping[key]
 	if !ok {
 		return false
 	}
+
+	mutex.Lock()
 
 	e := &c.entries[n]
 	if e.list != nil {
@@ -308,6 +337,8 @@ func (c *SLRUCache[K, V]) Remove(key K) bool {
 	e.key = zeroK
 	e.value = zeroV
 	c.freelist.insertHead(n)
+
+	mutex.Unlock()
 
 	if c.removeCb != nil {
 		c.removeCb(key)
