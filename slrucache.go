@@ -4,372 +4,360 @@ import (
 	"fmt"
 )
 
-const SLRU_EOF = -3 // End of list
+// SLRU_EOF is a special marker for the end of the list.
+const SLRU_EOF = -3
 
-// list of SLRUCacheEntries. Private functions care for consistency of structures so they can be atomic.
-type SLRUList struct {
-	entries *[]SLRUCacheEntry
-	head    int // head of list
-	tail    int // tail of list
-	count   int // number of entries
+// SLRUCacheEntry represents an element in the cache linked list.
+// It stores the key, value, and pointers to previous and next entries by index.
+// Key and Value are generic types.
+type SLRUCacheEntry[K comparable, V any] struct {
+	key   K
+	value V
+	prev  int             // index of previous entry (>=0 if set)
+	next  int             // index of next entry (>=0 if set)
+	list  *SLRUList[K, V] // pointer to the list this entry belongs to
 }
 
-func NewSLRUList(entries *[]SLRUCacheEntry) *SLRUList {
-	i := new(SLRUList)
-	i.count = 0
-	i.entries = entries
-	i.head = SLRU_EOF
-	i.tail = SLRU_EOF
-	return i
+// SLRUList is a doubly linked list of SLRUCacheEntries backed by an array.
+// It maintains head and tail indices and the count of entries.
+type SLRUList[K comparable, V any] struct {
+	entries *[]SLRUCacheEntry[K, V]
+	head    int // index of the head entry
+	tail    int // index of the tail entry
+	count   int // number of entries in the list
 }
 
-// remove entry from tail:
-func (i *SLRUList) removeTail() int {
-	t := i.tail
-	e := *i.entries
-	if t >= 0 {
-		i.tail = e[t].prev
-		e[t].next = SLRU_EOF
-		e[t].prev = SLRU_EOF
-		if i.tail == SLRU_EOF {
-			// last one has been removed - adjust head
-			i.head = SLRU_EOF
-		} else {
-			e[i.tail].next = SLRU_EOF
-		}
-		e[t].list = nil
-		i.count--
+// NewSLRUList initializes a new empty SLRUList backed by the given entries slice.
+func NewSLRUList[K comparable, V any](entries *[]SLRUCacheEntry[K, V]) *SLRUList[K, V] {
+	return &SLRUList[K, V]{
+		entries: entries,
+		head:    SLRU_EOF,
+		tail:    SLRU_EOF,
+		count:   0,
 	}
+}
+
+// removeTail removes the tail entry from the list and returns its index.
+func (l *SLRUList[K, V]) removeTail() int {
+	t := l.tail
+	if t < 0 {
+		return SLRU_EOF
+	}
+
+	e := *l.entries
+	l.tail = e[t].prev
+	e[t].next = SLRU_EOF
+	e[t].prev = SLRU_EOF
+
+	if l.tail == SLRU_EOF {
+		// List is now empty
+		l.head = SLRU_EOF
+	} else {
+		e[l.tail].next = SLRU_EOF
+	}
+	e[t].list = nil
+	l.count--
+
 	return t
 }
 
-// remove entry from list
-func (i *SLRUList) remove(n int) bool {
-	e := *i.entries
-	// check if entry is member of list
-	if e[n].list != i {
-		return false
+// removeHead removes the head entry from the list and returns its index.
+func (l *SLRUList[K, V]) removeHead() int {
+	h := l.head
+	if h < 0 {
+		return SLRU_EOF
 	}
-	if i.head == n {
-		// check head of list
-		i.removeHead()
-	} else if i.tail == n {
-		// check tail of list
-		i.removeTail()
-	} else {
-		e[e[n].next].prev = e[n].prev
-		e[e[n].prev].next = e[n].next
-		e[n].next = SLRU_EOF
-		e[n].prev = SLRU_EOF
-		e[n].list = nil
-		i.count--
-	}
-	return true
-}
 
-// remove head from list
-func (i *SLRUList) removeHead() int {
-	h := i.head
-	e := *i.entries
-	if h >= 0 {
-		i.head = e[h].next
-		e[h].next = SLRU_EOF
-		e[h].prev = SLRU_EOF
-		if i.head == SLRU_EOF {
-			// last one has been removed - adjust tail
-			i.tail = SLRU_EOF
-		} else {
-			e[i.head].prev = SLRU_EOF
-		}
-		e[h].list = nil
-		i.count--
+	e := *l.entries
+	l.head = e[h].next
+	e[h].next = SLRU_EOF
+	e[h].prev = SLRU_EOF
+
+	if l.head == SLRU_EOF {
+		// List is now empty
+		l.tail = SLRU_EOF
+	} else {
+		e[l.head].prev = SLRU_EOF
 	}
+	e[h].list = nil
+	l.count--
+
 	return h
 }
 
-// insert at head - does not check entry n before insert
-func (i *SLRUList) insertHead(n int) {
-	e := *i.entries
-	h := i.head
+// remove removes the entry at index n from the list.
+// Returns false if the entry is not part of this list.
+func (l *SLRUList[K, V]) remove(n int) bool {
+	e := *l.entries
+
+	// Check if entry belongs to this list
+	if e[n].list != l {
+		return false
+	}
+
+	if l.head == n {
+		l.removeHead()
+	} else if l.tail == n {
+		l.removeTail()
+	} else {
+		// Link previous and next entries
+		e[e[n].next].prev = e[n].prev
+		e[e[n].prev].next = e[n].next
+
+		e[n].next = SLRU_EOF
+		e[n].prev = SLRU_EOF
+		e[n].list = nil
+		l.count--
+	}
+
+	return true
+}
+
+// insertHead inserts the entry at index n at the head of the list.
+// Does not check if entry already exists in the list.
+func (l *SLRUList[K, V]) insertHead(n int) {
+	e := *l.entries
+	h := l.head
+
 	if h >= 0 {
-		// list has entries
+		// List has entries, link new head
 		e[h].prev = n
 		e[n].next = h
 	} else {
-		// list was empty
+		// List was empty
 		e[n].next = SLRU_EOF
-		i.tail = n
+		l.tail = n
 	}
+
 	e[n].prev = SLRU_EOF
-	e[n].list = i
-	i.head = n
-	i.count++
+	e[n].list = l
+	l.head = n
+	l.count++
 }
 
-//--------------------------------------------------------------------------
+// SLRUCache implements a segmented LRU cache with two segments:
+// - lrulist: protected entries with at least one hit (survivor entries)
+// - probelist: probationary entries with no hits yet
+// Entries are backed by an array and indexed by a map for O(1) lookup.
+// Key type must be comparable for map keys.
+type SLRUCache[K comparable, V any] struct {
+	entries []SLRUCacheEntry[K, V]
+	mapping map[K]int // key to entry index
 
-// SLRUCacheEntry is a element of a linked list backed by an array of elements for addressing
-type SLRUCacheEntry struct {
-	key   string
-	value string
-	prev  int       // index of previous entry ( >=0 if set )
-	next  int       // index of next entry ( >=0 if set )
-	list  *SLRUList // reference to the list, the entry is in.
+	cnum int // total number of entries (snum + pnum)
+	snum int // number of survivor entries (lrulist size)
+	pnum int // number of probationary entries (probelist size)
+
+	insertCb func() // optional callback after insert into lrulist
+	removeCb func() // optional callback after removal from lrulist
+
+	freelist  *SLRUList[K, V] // list of free entries
+	lrulist   *SLRUList[K, V] // protected segment
+	probelist *SLRUList[K, V] // probationary segment
 }
 
-//--------------------------------------------------------------------------
-
-// SLRUCache is a segmented least recently used cache.
-// It is divided into two segments. One segment holds the protected/surviver lru entries that at least have one hit.
-// The other holds the probationary entries that have no hit jet in order to protect the lru cache from beeing spoiled by data that is used only once.
-// There is a common list of entries for both segments backed by a map for entry lookup. The entries are connected in a linked list
-type SLRUCache struct {
-	entries []SLRUCacheEntry // array of cache entries
-	mapping map[string]int   // maps a key to cache entry
-	cnum    int              // total number of cache entries as per snum and pnum
-	snum    int              // configured number of survivor entries
-	pnum    int              // configured number of probe entries
-
-	insertCb func() // optional insert callback that is called after a key was inserted into lru segment.
-	removeCb func() // optional remove callback that is called after a key was removed from lru segment.
-
-	freelist  *SLRUList
-	lrulist   *SLRUList
-	probelist *SLRUList
-}
-
-func NewSLRUCache(lruEntries int, probeEntries int) *SLRUCache {
-	i := new(SLRUCache)
-	i.snum = lruEntries
-	i.pnum = probeEntries
-	i.cnum = i.pnum + i.snum
-
-	i.insertCb = i.insertCbStub
-	i.removeCb = i.removeCbStub
-
-	i.entries = make([]SLRUCacheEntry, i.cnum)
-	i.mapping = make(map[string]int)
-
-	i.freelist = NewSLRUList(&i.entries)
-	i.lrulist = NewSLRUList(&i.entries)
-	i.probelist = NewSLRUList(&i.entries)
-
-	// initialize freelist
-	for x := 0; x < i.cnum; x++ {
-		i.freelist.insertHead(x)
+// NewSLRUCache creates a new SLRUCache with given sizes for survivor and probe segments.
+func NewSLRUCache[K comparable, V any](lruEntries int, probeEntries int) *SLRUCache[K, V] {
+	cache := &SLRUCache[K, V]{
+		snum:    lruEntries,
+		pnum:    probeEntries,
+		cnum:    lruEntries + probeEntries,
+		mapping: make(map[K]int),
 	}
 
-	return i
+	cache.entries = make([]SLRUCacheEntry[K, V], cache.cnum)
+
+	cache.freelist = NewSLRUList(&cache.entries)
+	cache.lrulist = NewSLRUList(&cache.entries)
+	cache.probelist = NewSLRUList(&cache.entries)
+
+	cache.insertCb = cache.insertCbStub
+	cache.removeCb = cache.removeCbStub
+
+	// Initialize freelist with all entries
+	for i := 0; i < cache.cnum; i++ {
+		cache.freelist.insertHead(i)
+	}
+
+	return cache
 }
 
-func (i *SLRUCache) doPanic(msg string) {
-	//allow checking consistency and collecting information before paniking...
-	checkSLRUCacheSanity(i)
+// doPanic is called on fatal errors to check cache sanity before panicking.
+func (c *SLRUCache[K, V]) doPanic(msg string) {
+	checkSLRUCacheSanity(c)
 	panic(msg)
 }
 
-func (i *SLRUCache) insertCbStub() {}
-func (i *SLRUCache) removeCbStub() {}
+// Default no-op insert callback
+func (c *SLRUCache[K, V]) insertCbStub() {}
 
-// var debug bool = true
+// Default no-op remove callback
+func (c *SLRUCache[K, V]) removeCbStub() {}
 
-// func (i *SLRUCache) log(msg string) {
-// 	if debug {
-// 		fmt.Printf("f:%0.2d l:%0.2d p:%0.2d - %s\n", i.freelist.count, i.lrulist.count, i.probelist.count, msg)
-// 	}
-// }
-
-// Lookup a value for a key.
-// Returns a string pointer or nil if not found
-func (i *SLRUCache) Lookup(key string) (s *string) {
-	// i.log(fmt.Sprintf("lookup: [%s] --", key))
-	// find entry via mapping
-	if n, ok := i.mapping[key]; ok {
-		e := &i.entries[n]
-		s = &e.value
-		if e.list == i.lrulist {
-			// if found in lrulist and its not the head allready
-			// i.log(fmt.Sprintf("lookup: [%s] found: in lrulist", key))
-
-			if n != i.lrulist.head {
-				// remove found from lrulist
-				// i.log(fmt.Sprintf("lookup: [%s] found: moving entry to top of lru", key))
-				if !i.lrulist.remove(n) {
-					i.doPanic(fmt.Sprintf("Inside lookup(%s). can not remove from lrulist[%d]", key, n))
-				}
-				// insert at head of lrulist
-				i.lrulist.insertHead(n)
-				// call the inster cb
-				i.insertCb()
-			}
-			// else {
-			// i.log(fmt.Sprintf("lookup: [%s] found: lru entry is on top allready", key))
-			// }
-		} else {
-			// i.log(fmt.Sprintf("lookup: [%s] found other: in other list", key))
-			// e.list can be freelist or probelist
-			// if found in  other list, try to move the entry to head of lru
-			if i.lrulist.count >= i.snum {
-				// if there is no space in lrulist
-				// remove tail from lrulist
-				lt := i.lrulist.removeTail()
-
-				// delete old key from mapping and clear data
-				delete(i.mapping, i.entries[lt].key)
-				i.entries[lt].key = ""
-				i.entries[lt].value = ""
-
-				// and put into freelist
-				i.freelist.insertHead(lt)
-
-				// call the remove cb
-				i.removeCb()
-			}
-			// i.log(fmt.Sprintf("lookup: [%s] found other: remove from other list -> insert top of lru", key))
-			// remove found from list
-			if !e.list.remove(n) {
-				i.doPanic(fmt.Sprintf("Inside lookup(%s). can not remove from free- or probe-list[%d]", key, n))
-			}
-			// insert at head of lrulist
-			i.lrulist.insertHead(n)
-		}
-	} else {
-		s = nil
-		// i.log(fmt.Sprintf("lookup: [%s] not found", key))
+// Lookup returns a pointer to the value for the given key, or nil if not found.
+// It also promotes entries from probelist to lrulist on hit.
+func (c *SLRUCache[K, V]) Lookup(key K) *V {
+	n, ok := c.mapping[key]
+	if !ok {
+		return nil
 	}
-	return s
+
+	e := &c.entries[n]
+	// If entry is in lrulist (protected segment)
+	if e.list == c.lrulist {
+		if n != c.lrulist.head {
+			// Move to head of lrulist (most recently used)
+			if !c.lrulist.remove(n) {
+				c.doPanic(fmt.Sprintf("Lookup: cannot remove from lrulist index %d", n))
+			}
+			c.lrulist.insertHead(n)
+			c.insertCb()
+		}
+		return &e.value
+	}
+
+	// Entry is in probelist or freelist (should not be freelist)
+	// Try to promote to lrulist
+	if c.lrulist.count >= c.snum {
+		// lrulist full, remove tail entry
+		lt := c.lrulist.removeTail()
+		if lt != SLRU_EOF {
+			// Remove old key from mapping and clear entry
+			delete(c.mapping, c.entries[lt].key)
+			var zeroK K
+			var zeroV V
+			c.entries[lt].key = zeroK
+			c.entries[lt].value = zeroV
+			// Put removed entry into freelist
+			c.freelist.insertHead(lt)
+			c.removeCb()
+		}
+	}
+
+	// Remove from current list (probelist)
+	if !e.list.remove(n) {
+		c.doPanic(fmt.Sprintf("Lookup: cannot remove from probelist index %d", n))
+	}
+	// Insert at head of lrulist
+	c.lrulist.insertHead(n)
+
+	return &e.value
 }
 
-// Insert or replace a value for a key in the cache
-func (i *SLRUCache) Insert(key string, value string) {
-	// i.log(fmt.Sprintf("insert: [%s] --", key))
-	// lookup
-	if n, ok := i.mapping[key]; ok {
-		// i.log(fmt.Sprintf("insert: [%s] found in mapping", key))
-		e := &i.entries[n]
-		// replace a key
-		if e.value != value {
-			// reset only if value differs
-			e.value = value
-		}
-	} else {
-		// insert new entry
-		if i.probelist.count >= i.pnum {
-			// i.log(fmt.Sprintf("insert: [%s] insert: probelist is full- move tail to freelist", key))
-			// if probelist is full
-			// remove tail from probelist
-			n = i.probelist.removeTail()
-			// remove the key from mapping
-			delete(i.mapping, i.entries[n].key)
-			i.entries[n].key = ""
-			i.entries[n].value = ""
-			// call remove callback
-			i.removeCb()
-		} else {
-			// i.log(fmt.Sprintf("insert: [%s] insert: probelist is free", key))
-			// pick entry from freelist
-			n = i.freelist.removeTail()
-			if n == SLRU_EOF {
-				i.doPanic(fmt.Sprintf("Inside insert(key:%s, value:%s) no free entry available.", key, value))
-			}
-		}
-		// use recycled n for new entry and set key/value
-		// e := &i.entries[n]
-		// e.key = key
-		// e.value = value
-
-		i.entries[n].key = key
-		i.entries[n].value = value
-
-		// insert new key into mapping
-		i.mapping[key] = n
-
-		// insert entry at head of probelist
-		// i.log(fmt.Sprintf("insert: [%s] insert: insert head of probelist", key))
-		i.probelist.insertHead(n)
+// Insert adds or updates a key-value pair in the cache.
+// New entries go into the probelist first.
+func (c *SLRUCache[K, V]) Insert(key K, value V) {
+	if n, ok := c.mapping[key]; ok {
+		// Key exists, update value if changed
+		e := &c.entries[n]
+		e.value = value
+		return
 	}
+
+	var n int
+	if c.probelist.count >= c.pnum {
+		// Probelist full, evict tail entry
+		n = c.probelist.removeTail()
+		if n == SLRU_EOF {
+			c.doPanic(fmt.Sprintf("Insert: no entry to evict in probelist for key %v", key))
+		}
+		// Remove old key from mapping and clear entry
+		delete(c.mapping, c.entries[n].key)
+		var zeroK K
+		var zeroV V
+		c.entries[n].key = zeroK
+		c.entries[n].value = zeroV
+		c.removeCb()
+	} else {
+		// Take from freelist
+		n = c.freelist.removeTail()
+		if n == SLRU_EOF {
+			c.doPanic(fmt.Sprintf("Insert: no free entry available for key %v", key))
+		}
+	}
+
+	// Set new key and value
+	c.entries[n].key = key
+	c.entries[n].value = value
+
+	// Add to mapping
+	c.mapping[key] = n
+
+	// Insert at head of probelist
+	c.probelist.insertHead(n)
 }
 
-// Remove an entry by its key
-func (i *SLRUCache) Remove(key string) bool {
-
-	n, ok := i.mapping[key]
+// Remove deletes an entry by key from the cache.
+// Returns true if the entry was found and removed.
+func (c *SLRUCache[K, V]) Remove(key K) bool {
+	n, ok := c.mapping[key]
 	if !ok {
 		return false
 	}
 
-	// remove entry from its list
-	e := &i.entries[n]
-	e.list.remove(n)
+	e := &c.entries[n]
+	if e.list != nil {
+		e.list.remove(n)
+	}
 
-	// remove entry from its mapping
-	delete(i.mapping, key)
-	i.entries[n].key = ""
-	i.entries[n].value = ""
+	delete(c.mapping, key)
 
-	// put it back to freelist
-	i.freelist.insertHead(n)
+	// Clear entry and return to freelist
+	var zeroK K
+	var zeroV V
+	e.key = zeroK
+	e.value = zeroV
+	c.freelist.insertHead(n)
 
-	// call the remove cb
-	i.removeCb()
+	c.removeCb()
 
 	return true
 }
 
-func checkSLRUCacheSanity(c *SLRUCache) bool {
-	// walk throu all lists, test entries and check count
-	var fail bool
-	var topic string
+// checkSLRUCacheSanity verifies internal consistency of the cache lists.
+// Returns true if any inconsistency is found.
+func checkSLRUCacheSanity[K comparable, V any](c *SLRUCache[K, V]) bool {
+	fail := false
+	topic := ""
 
 	failure := func(msg string) {
 		fail = true
 		fmt.Printf("%s: %s\n", topic, msg)
 	}
 
-	walkList := func(l *SLRUList) {
+	walkList := func(l *SLRUList[K, V]) {
 		n := l.head
 		ln := n
 		entries := *l.entries
 
-		var ll *SLRUList
-		ll = nil
+		var lastList *SLRUList[K, V]
 
 		for n >= 0 {
 			e := entries[n]
-			if e.prev >= 0 {
-				if entries[e.prev].next != n {
-					failure("prev link failure")
 
-				}
+			if e.prev >= 0 && entries[e.prev].next != n {
+				failure("prev link failure")
 			}
-			if e.next >= 0 {
-				if entries[e.next].prev != n {
-					failure("next link failure")
-				}
+			if e.next >= 0 && entries[e.next].prev != n {
+				failure("next link failure")
 			}
-
 			if e.list == nil {
-				failure("list reference failure: nil list reference")
+				failure("nil list reference")
+			}
+			if lastList != nil && lastList != e.list {
+				failure("multiple list references")
 			}
 
-			if ll != nil && ll != e.list {
-				failure("list reference failure: multiple liste references")
-			}
-
-			if e.key == "" && e.value != "" {
-				failure("value error")
-			}
 			ln = n
 			n = e.next
-			ll = e.list
-		}
-		if l.tail != ln {
-			failure("tail reference failure")
+			lastList = e.list
 		}
 
+		if l.tail != ln {
+			failure("tail reference mismatch")
+		}
 	}
 
-	// walk throu all lists, test entries and check count
 	topic = "freelist"
 	walkList(c.freelist)
 	topic = "probelist"
