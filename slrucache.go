@@ -1,3 +1,5 @@
+// author: (c) Gunter Hartmann
+
 package slrucache
 
 import (
